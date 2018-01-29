@@ -1,0 +1,182 @@
+---
+title: "Course Project Prediction"
+author: "Kim Rosmus"
+date: "January 28, 2018"
+output:
+  html_document:
+    keep_md: yes
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Background:
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+## Goal:
+
+The goal of your project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. You may use any of the other variables to predict with. You should create a report describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did. You will also use your prediction model to predict 20 different test cases.
+
+## Data:
+
+```{r}
+library(e1071)
+```
+
+The training data for this project are available here:
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here:
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. If you use the document you create for this class for any purpose please cite them as they have been very generous in allowing their data to be used for this kind of assignment.
+
+## Preparing the data:
+
+**Reading in the training data**
+
+```{r a}
+require(data.table)
+url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+TrainData <- fread(url)
+```
+**Reading in the testing data**
+
+```{r b}
+url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+TestData <- fread(url)
+```
+**Using variables that do not have missing values to be the predictors **
+
+```{r c}
+Missing <- sapply(TestData, function (x) any(is.na(x) | x == ""))
+Predictor <- !Missing & grepl("belt|[^(fore)]arm|dumbbell|forearm", names(Missing))
+predCandidates <- names(Missing)[Predictor]
+predCandidates
+```
+**Subsetting the data to include only the preCandiates from above, and the "classe" variable**
+
+```{r d}
+varToInclude <- c("classe", predCandidates)
+TrainData <- TrainData[, varToInclude, with=FALSE]
+dim(TrainData)
+names(TrainData)
+
+TrainData <- TrainData[, classe := factor(TrainData[, classe])]
+TrainData[, .N, classe]
+```
+**Split data into a 60% train and 40% test**
+
+```{r e}
+require(caret)
+inTrain <- createDataPartition(TrainData$classe, p=0.6)
+DTrain <- TrainData[inTrain[[1]]]
+DProbe <- TrainData[-inTrain[[1]]]
+```
+**Processing Data**
+
+The Train and Probe data will be centered and scale and near zero variance will be checked.
+
+```{r f}
+X <- DTrain[, predCandidates, with=FALSE]
+preProc <- preProcess(X)
+preProc
+XCS <- predict(preProc, X)
+DTrainCS <- data.table(data.frame(classe = DTrain[, classe], XCS))
+
+X <- DProbe[, predCandidates, with=FALSE]
+XCS <- predict(preProc, X)
+DProbeCS <- data.table(data.frame(classe = DProbe[, classe], XCS))
+
+zerovar <- nearZeroVar(DTrainCS, saveMetrics=TRUE)
+if (any(zerovar$zerovar)) zerovar else message("No variables with near zero variance")
+```
+**Examine prediction variables**
+
+```{r g}
+histGroup <- function (data, regex) {
+  col <- grep(regex, names(data))
+  col <- c(col, which(names(data) == "classe"))
+  require(reshape2)
+  n <- nrow(data)
+  DMelted <- melt(data[, col, with=FALSE][, rownum := seq(1, n)], id.vars=c("rownum", "classe"))
+  require(ggplot2)
+  ggplot(DMelted, aes(x=classe, y=value)) +
+    geom_violin(aes(color=classe, fill=classe), alpha=1/2) +              geom_jitter(aes(color=classe, fill=classe), alpha=1/10) +
+    geom_smooth(aes(group=1), method="gam", color="black", alpha=1/2,     size=2) +
+    facet_wrap(~ variable, scale="free_y") +
+    scale_color_brewer(palette="Spectral") +
+    scale_fill_brewer(palette="Spectral") +
+    labs(x="", y="") +
+    theme(legend.position="none")
+}
+histGroup(DTrainCS, "belt")
+histGroup(DTrainCS, "[^(fore)]arm")
+histGroup(DTrainCS, "dumbbell")
+histGroup(DTrainCS, "forearm")
+```
+## Prediciton Model
+
+**Random Forest**
+
+Using this method, the sample error should be small. Only 40% of the data will the error be estimate. The error should be lower than 5% to be reasonable.
+
+Paralled clusters and control parameters will be set up.The fit model over the tuning paremetetrs will be completed. 
+
+```{r h}
+require(e1071)
+require(Parallel)
+require(doParallel)
+require(foreach)
+require(iterators)
+
+cl <- makeCluster(detectCores() - 1)
+registerDoParallel(cl)
+
+ctrl <- trainControl(classProbs=TRUE,
+                     savePredictions=TRUE,
+                     allowParallel=TRUE)
+                     
+method <- "rf"
+system.time(trainingModel <- train(classe ~ ., data=DTrainCS, method=method)) 
+
+stopCluster(cl)
+```
+
+**Evaluation of the training and probing set of data**
+
+```{r i}
+trainingModel
+hat <- predict(trainingModel, DTrainCS)
+confusionMatrix(hat, DTrain[, classe])
+
+
+hat <- predict(trainingModel, DProbeCS)
+confusionMatrix(hat, DProbeCS[, classe])
+```
+
+##Final Model##
+
+```{r j}
+varImp(trainingModel)
+trainingModel$finalModel
+
+save(trainingModel, file="trainingModel.RData")
+```
+
+##Predictions
+
+```{r k}
+load(file="trainingModel.RData", verbose=TRUE)
+
+DTestCS <- predict(preProc, TestData[, predCandidates, with=FALSE])
+hat <- predict(trainingModel, DTestCS)
+TestData <- cbind(hat , TestData)
+subset(TestData, select=names(TestData)[grep("belt|[^(fore)]arm|dumbbell|forearm", names(TestData), invert=TRUE)])
+```
+
